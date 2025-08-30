@@ -1,40 +1,91 @@
-// 1️⃣ Modules import
 const express = require('express');
 const http = require('http');
-const { Server } = require('socket.io');
+const socketIo = require('socket.io');
 
-// 2️⃣ Express app और HTTP server बनाना
 const app = express();
 const server = http.createServer(app);
+const io = socketIo(server, { cors: { origin: "*" } }); // CORS आपके GitHub Pages URL के लिए
 
-// 3️⃣ Socket.io setup
-const io = new Server(server, {
-  cors: {
-    origin: "*",       // किसी भी frontend से connect हो सके
-    methods: ["GET", "POST"]
-  }
-});
+app.use(express.static('public')); // स्टेटिक फाइल्स, अगर जरूरी हो
 
-// 4️⃣ Simple test route
-app.get('/', (req, res) => {
-  res.send('Chat server is running');
-});
+let waitingUsers = []; // वेटिंग यूजर्स की लिस्ट
+let pairedUsers = new Map(); // पेयर किए गए यूजर्स (socket.id -> { partnerId, username })
 
-// 5️⃣ Socket.io connection
 io.on('connection', (socket) => {
-  console.log('User connected');
+  console.log('User connected:', socket.id);
 
-  // Message receive और broadcast
-  socket.on('chat message', (msg) => {
-    io.emit('chat message', msg);
+  // यूजर चैट शुरू करता है
+  socket.on('startChat', (data) => {
+    const { username } = data;
+    if (!username) {
+      socket.emit('system', { text: '❌ Username required' });
+      return;
+    }
+
+    // यूजर को वेटिंग लिस्ट में डालें
+    waitingUsers.push({ id: socket.id, username });
+    pairedUsers.set(socket.id, { username, partnerId: null });
+    socket.emit('system', { text: '🔍 Searching for a stranger...' });
+
+    // अगर 2 यूजर्स वेटिंग हैं, तो उन्हें पेयर करें
+    if (waitingUsers.length >= 2) {
+      const user1 = waitingUsers.shift();
+      const user2 = waitingUsers.shift();
+
+      // दोनों को एक रूम में जोड़ें
+      const roomId = `${user1.id}-${user2.id}`;
+      io.sockets.sockets.get(user1.id).join(roomId);
+      io.sockets.sockets.get(user2.id).join(roomId);
+
+      // पेयरिंग अपडेट करें
+      pairedUsers.set(user1.id, { username: user1.username, partnerId: user2.id });
+      pairedUsers.set(user2.id, { username: user2.username, partnerId: user1.id });
+
+      // दोनों को कनेक्टेड नोटिफिकेशन भेजें
+      io.to(roomId).emit('system', { text: '✅ Connected! Say Hi 👋' });
+    }
   });
 
-  // Disconnect log
+  // मैसेज भेजना
+  socket.on('sendMessage', (data) => {
+    const { message, username } = data;
+    const user = pairedUsers.get(socket.id);
+    if (user && user.partnerId) {
+      const roomId = `${socket.id}-${user.partnerId}`.split('-').sort().join('-');
+      io.to(roomId).emit('receiveMessage', { username, message });
+    }
+  });
+
+  // टाइपिंग इंडिकेटर
+  socket.on('typing', (data) => {
+    const { username } = data;
+    const user = pairedUsers.get(socket.id);
+    if (user && user.partnerId) {
+      const roomId = `${socket.id}-${user.partnerId}`.split('-').sort().join('-');
+      socket.to(roomId).emit('typing', { username });
+    }
+  });
+
+  // डिस्कनेक्ट
   socket.on('disconnect', () => {
-    console.log('User disconnected');
+    const user = pairedUsers.get(socket.id);
+    if (user && user.partnerId) {
+      const roomId = `${socket.id}-${user.partnerId}`.split('-').sort().join('-');
+      io.to(roomId).emit('system', { text: `❌ ${user.username} disconnected` });
+      pairedUsers.delete(user.partnerId);
+    }
+    waitingUsers = waitingUsers.filter(u => u.id !== socket.id);
+    pairedUsers.delete(socket.id);
+    console.log('User disconnected:', socket.id);
+  });
+
+  // पिंग-पोंग हार्टबीट
+  socket.on('ping', () => {
+    socket.emit('pong');
   });
 });
 
-// 6️⃣ Port set करना
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
