@@ -9,45 +9,38 @@ app.use(cors());
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: '*', // Ya phir aapke frontend ka URL daalen
+    origin: '*', // Frontend URL ya '*'
     methods: ['GET', 'POST']
   }
 });
 
-// User pairing ke liye variables
+// User pairing ke liye
 const waitingUsers = [];
 const connectedPairs = {};
 
 io.on('connection', (socket) => {
-  console.log('A user connected:', socket.id);
+  console.log('User connected:', socket.id);
   
-  // New user ko waiting list mein add karo
+  // New user ko waiting list mein daalo
   waitingUsers.push(socket.id);
   socket.emit('system', { text: 'waiting' });
   
-  // Do users available hone par unhe connect karo
+  // Pairing logic
   if (waitingUsers.length >= 2) {
     const user1 = waitingUsers.shift();
     const user2 = waitingUsers.shift();
-    
     connectedPairs[user1] = user2;
     connectedPairs[user2] = user1;
-    
-    // Dono users ko connected message bhejo
     io.to(user1).emit('system', { text: 'connected' });
     io.to(user2).emit('system', { text: 'connected' });
-    
     console.log(`Paired ${user1} with ${user2}`);
   }
   
   // Messages handle karo
   socket.on('message', (data) => {
     try {
-      // JSON string ko parse karo agar needed
       const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
-      
       if (parsedData.type === 'message') {
-        // Message ko paired user tak pahunchao
         const partnerId = connectedPairs[socket.id];
         if (partnerId) {
           io.to(partnerId).emit('message', {
@@ -56,12 +49,9 @@ io.on('connection', (socket) => {
           });
         }
       } else if (parsedData.type === 'typing') {
-        // Typing indicator paired user ko bhejo
         const partnerId = connectedPairs[socket.id];
         if (partnerId) {
-          io.to(partnerId).emit('message', {
-            type: 'typing'
-          });
+          io.to(partnerId).emit('message', { type: 'typing' });
         }
       }
     } catch (error) {
@@ -71,35 +61,30 @@ io.on('connection', (socket) => {
   
   // Disconnect handle karo
   socket.on('disconnect', () => {
-    console.log('A user disconnected:', socket.id);
-    
-    // Waiting list se remove karo
-    const index = waitingUsers.indexOf(socket.id);
-    if (index !== -1) {
-      waitingUsers.splice(index, 1);
-    }
-    
-    // Partner ko disconnect message bhejo
+    console.log('User disconnected:', socket.id);
     const partnerId = connectedPairs[socket.id];
     if (partnerId) {
       io.to(partnerId).emit('system', { text: 'disconnected' });
       delete connectedPairs[partnerId];
-      
-      // Partner ko phir se waiting list mein daalo
       waitingUsers.push(partnerId);
       io.to(partnerId).emit('system', { text: 'waiting' });
     }
-    
     delete connectedPairs[socket.id];
+    
+    // Waiting list se bhi remove karo
+    const index = waitingUsers.indexOf(socket.id);
+    if (index !== -1) {
+      waitingUsers.splice(index, 1);
+    }
   });
 });
 
-// Health check endpoint
+// Health check endpoint for Render.com
 app.get('/health', (req, res) => {
   res.status(200).json({ 
     status: 'OK', 
-    usersWaiting: waitingUsers.length,
-    activePairs: Object.keys(connectedPairs).length / 2
+    waitingUsers: waitingUsers.length,
+    connectedPairs: Object.keys(connectedPairs).length / 2
   });
 });
 
