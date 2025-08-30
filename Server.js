@@ -5,15 +5,20 @@ const socketIo = require('socket.io');
 const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
-  cors: { origin: "*" }, // CORS आपके GitHub Pages URL के लिए
-  pingTimeout: 60000, // रीकनेक्शन के लिए
+  cors: { origin: "*" },
+  pingTimeout: 60000,
   pingInterval: 25000
 });
 
-app.use(express.static('public')); // स्टेटिक फाइल्स, अगर जरूरी हो
+// टेस्ट रूट: सर्वर स्टेटस चेक करने के लिए
+app.get('/', (req, res) => {
+  res.send('TikTalk Server is Running!');
+});
 
-let waitingUsers = []; // वेटिंग यूजर्स की लिस्ट
-let pairedUsers = new Map(); // पेयर किए गए यूजर्स (socket.id -> { partnerId, username })
+app.use(express.static('public'));
+
+let waitingUsers = [];
+let pairedUsers = new Map();
 
 io.on('connection', (socket) => {
   console.log(`User connected: ${socket.id}`);
@@ -28,19 +33,21 @@ io.on('connection', (socket) => {
     waitingUsers.push({ id: socket.id, username });
     pairedUsers.set(socket.id, { username, partnerId: null });
     socket.emit('system', { text: '🔍 Searching for a stranger...' });
+    console.log(`User ${username} waiting for match`);
 
     if (waitingUsers.length >= 2) {
       const user1 = waitingUsers.shift();
       const user2 = waitingUsers.shift();
 
       const roomId = `${user1.id}-${user2.id}`.split('-').sort().join('-');
-      io.sockets.sockets.get(user1.id).join(roomId);
-      io.sockets.sockets.get(user2.id).join(roomId);
+      socket.to(user1.id).join(roomId);  // फिक्स: io.sockets.sockets.get() की बजाय socket.to() यूज
+      socket.to(user2.id).join(roomId);
 
       pairedUsers.set(user1.id, { username: user1.username, partnerId: user2.id });
       pairedUsers.set(user2.id, { username: user2.username, partnerId: user1.id });
 
       io.to(roomId).emit('system', { text: '✅ Connected! Say Hi 👋' });
+      console.log(`Paired users: ${user1.username} and ${user2.username}`);
     }
   });
 
@@ -50,6 +57,7 @@ io.on('connection', (socket) => {
     if (user && user.partnerId) {
       const roomId = `${socket.id}-${user.partnerId}`.split('-').sort().join('-');
       io.to(roomId).emit('receiveMessage', { username, message });
+      console.log(`Message from ${username}: ${message}`);
     }
   });
 
@@ -67,23 +75,26 @@ io.on('connection', (socket) => {
     if (user && user.partnerId) {
       const roomId = `${socket.id}-${user.partnerId}`.split('-').sort().join('-');
       io.to(roomId).emit('system', { text: `❌ ${user.username} disconnected` });
-      io.sockets.sockets.get(user.partnerId)?.emit('system', { text: '🔍 Searching for a new stranger...' });
       pairedUsers.delete(user.partnerId);
     }
     waitingUsers = waitingUsers.filter(u => u.id !== socket.id);
     pairedUsers.delete(socket.id);
     socket.emit('system', { text: '🔍 Searching for a new stranger...' });
-    waitingUsers.push({ id: socket.id, username: user.username });
+    if (user) {
+      waitingUsers.push({ id: socket.id, username: user.username });
+    }
+    // पेयरिंग दोहराएं
     if (waitingUsers.length >= 2) {
       const user1 = waitingUsers.shift();
       const user2 = waitingUsers.shift();
       const roomId = `${user1.id}-${user2.id}`.split('-').sort().join('-');
-      io.sockets.sockets.get(user1.id).join(roomId);
-      io.sockets.sockets.get(user2.id).join(roomId);
+      socket.to(user1.id).join(roomId);
+      socket.to(user2.id).join(roomId);
       pairedUsers.set(user1.id, { username: user1.username, partnerId: user2.id });
       pairedUsers.set(user2.id, { username: user2.username, partnerId: user1.id });
       io.to(roomId).emit('system', { text: '✅ Connected! Say Hi 👋' });
     }
+    console.log(`Next chat requested by ${user ? user.username : 'Unknown'}`);
   });
 
   socket.on('disconnect', () => {
