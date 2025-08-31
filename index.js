@@ -1,105 +1,91 @@
 const WebSocket = require('ws');
-const http = require('http');
 
-// Basic HTTP server for Render.com health check
-const server = http.createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('WebSocket server is running');
-});
+// Create a WebSocket server on port 8080.
+// Render.com will automatically use the correct port from the environment variable.
+const wss = new WebSocket.Server({ port: process.env.PORT || 8080 });
 
-// WebSocket server
-const wss = new WebSocket.Server({ server });
+console.log('Server started...');
 
-let waitingUser = null;
+// These will hold users waiting for a partner.
+let waitingTextUser = null;
+let waitingVideoUser = null;
 
-// Timeout duration (30 seconds)
-const WAITING_TIMEOUT = 30000; // in milliseconds
-
-wss.on('connection', (ws, req) => {
+wss.on('connection', ws => {
     console.log('Client connected');
+    ws.partner = null;
 
-    // Security: Allow only specific origins
-    const origin = req.headers.origin;
-    const allowedOrigins = ['https://tiktalkchat.github.io', 'http://localhost:3000', 'http://localhost:8000'];
-    if (!allowedOrigins.includes(origin)) {
-        console.log(`Invalid origin, connection rejected: ${origin}`);
-        ws.close(1008, 'Invalid Origin');
-        return;
-    }
-
-    // Set creation time for timeout
-    ws.createdAt = Date.now();
-    ws.isAlive = true; // For future heartbeat (optional)
-
-    // Pairing logic
-    if (waitingUser && waitingUser.readyState === WebSocket.OPEN) {
-        // Pair with waiting user
-        ws.partner = waitingUser;
-        waitingUser.partner = ws;
-        waitingUser = null;
-
-        // Notify both users
-        ws.send(JSON.stringify({ type: 'system', text: 'connected' }));
-        ws.partner.send(JSON.stringify({ type: 'system', text: 'connected' }));
-        console.log('Users paired!');
-    } else {
-        // Add to waiting queue
-        waitingUser = ws;
-        ws.send(JSON.stringify({ type: 'system', text: 'waiting' }));
-        console.log('User is waiting for a partner.');
-    }
-
-    // Handle messages
-    ws.on('message', (message) => {
+    ws.on('message', message => {
         try {
-            const data = JSON.parse(message.toString());
-            if (!['message', 'typing'].includes(data.type)) {
-                console.warn('Invalid message type:', data);
-                return;
+            const data = JSON.parse(message);
+
+            // When a user wants to join the chat
+            if (data.type === 'join') {
+                console.log(`User wants to join ${data.mode} chat`);
+                ws.mode = data.mode; // Store the mode ('text' or 'video')
+
+                if (ws.mode === 'text') {
+                    if (waitingTextUser) {
+                        // Pair with the waiting user
+                        pairUsers(ws, waitingTextUser);
+                        waitingTextUser = null; // Clear the waiting spot
+                    } else {
+                        // No one is waiting, so this user has to wait
+                        waitingTextUser = ws;
+                        ws.send(JSON.stringify({ type: 'system', text: 'waiting' }));
+                        console.log('User is waiting for a text partner.');
+                    }
+                } else if (ws.mode === 'video') {
+                    if (waitingVideoUser) {
+                        // Pair with the waiting user
+                        pairUsers(ws, waitingVideoUser);
+                        waitingVideoUser = null; // Clear the waiting spot
+                    } else {
+                        // No one is waiting, so this user has to wait
+                        waitingVideoUser = ws;
+                        ws.send(JSON.stringify({ type: 'system', text: 'waiting' }));
+                        console.log('User is waiting for a video partner.');
+                    }
+                }
             }
-            if (ws.partner && ws.partner.readyState === WebSocket.OPEN) {
+            // For all other message types, just send them to the partner
+            else if (ws.partner) {
+                // Add the original message type to be forwarded
+                data.type = data.type;
                 ws.partner.send(JSON.stringify(data));
-            } else if (ws.partner) {
-                // Partner disconnected
-                ws.send(JSON.stringify({ type: 'system', text: 'disconnected' }));
-                ws.partner = null;
             }
-        } catch (error) {
-            console.error('Error parsing message:', error);
+
+        } catch (e) {
+            console.error('Error processing message:', e);
         }
     });
 
-    // Handle disconnect
     ws.on('close', () => {
         console.log('Client disconnected');
-        if (ws === waitingUser) {
-            waitingUser = null;
-        }
-        if (ws.partner && ws.partner.readyState === WebSocket.OPEN) {
+        // If the disconnected user had a partner, notify them.
+        if (ws.partner) {
             ws.partner.send(JSON.stringify({ type: 'system', text: 'disconnected' }));
             ws.partner.partner = null;
         }
-    });
-
-    // Handle errors
-    ws.on('error', (error) => {
-        console.error('WebSocket error:', error);
-        ws.close();
+        // If the disconnected user was waiting, remove them from the waiting queue.
+        if (waitingTextUser === ws) {
+            waitingTextUser = null;
+            console.log('Waiting text user disconnected.');
+        }
+        if (waitingVideoUser === ws) {
+            waitingVideoUser = null;
+            console.log('Waiting video user disconnected.');
+        }
     });
 });
 
-// Timeout for waiting users
-setInterval(() => {
-    if (waitingUser && Date.now() - waitingUser.createdAt > WAITING_TIMEOUT) {
-        console.log('Waiting timeout for user');
-        waitingUser.send(JSON.stringify({ type: 'system', text: 'timeout' }));
-        waitingUser.close();
-        waitingUser = null;
-    }
-}, 10000); // Check every 10 seconds
+function pairUsers(ws1, ws2) {
+    // Assign each user as the other's partner
+    ws1.partner = ws2;
+    ws2.partner = ws1;
 
-// Start server on Render.com port
-const PORT = process.env.PORT || 10000;
-server.listen(PORT, () => {
-    console.log(`Server is listening on port ${PORT}`);
-});
+    console.log('Users paired');
+    
+    // Notify both users that they are connected
+    ws1.send(JSON.stringify({ type: 'system', text: 'connected' }));
+    ws2.send(JSON.stringify({ type: 'system', text: 'connected' }));
+}
