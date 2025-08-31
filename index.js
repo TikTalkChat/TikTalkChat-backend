@@ -1,80 +1,104 @@
 const WebSocket = require('ws');
 const http = require('http');
 
-// एक बेसिक HTTP सर्वर बनाएं (Render.com पर हेल्थ चेक के लिए ज़रूरी है)
+// Basic HTTP server for Render.com health check
 const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('WebSocket server is running');
 });
 
-// WebSocket सर्वर बनाएं
+// WebSocket server
 const wss = new WebSocket.Server({ server });
 
 let waitingUser = null;
 
+// Timeout duration (30 seconds)
+const WAITING_TIMEOUT = 30000; // in milliseconds
+
 wss.on('connection', (ws, req) => {
     console.log('Client connected');
 
-    // सुरक्षा के लिए: केवल आपके Frontend URL से कनेक्शन स्वीकार करें
+    // Security: Allow only specific origins
     const origin = req.headers.origin;
-    if (origin !== 'https://tiktalkchat.github.io') {
+    const allowedOrigins = ['https://tiktalkchat.github.io', 'http://localhost:3000', 'http://localhost:8000'];
+    if (!allowedOrigins.includes(origin)) {
         console.log(`Invalid origin, connection rejected: ${origin}`);
-        ws.close(1008, "Invalid Origin");
+        ws.close(1008, 'Invalid Origin');
         return;
     }
 
-    // यूज़र्स को जोड़ने का लॉजिक
-    if (waitingUser) {
-        // अगर कोई यूज़र इंतज़ार कर रहा है, तो उसे इसके साथ जोड़ दें
+    // Set creation time for timeout
+    ws.createdAt = Date.now();
+    ws.isAlive = true; // For future heartbeat (optional)
+
+    // Pairing logic
+    if (waitingUser && waitingUser.readyState === WebSocket.OPEN) {
+        // Pair with waiting user
         ws.partner = waitingUser;
         waitingUser.partner = ws;
         waitingUser = null;
 
-        // दोनों यूज़र्स को बताएं कि वे कनेक्ट हो गए हैं
-        ws.partner.send(JSON.stringify({ type: 'system', text: 'connected' }));
+        // Notify both users
         ws.send(JSON.stringify({ type: 'system', text: 'connected' }));
+        ws.partner.send(JSON.stringify({ type: 'system', text: 'connected' }));
         console.log('Users paired!');
     } else {
-        // अगर कोई इंतज़ार नहीं कर रहा, तो इस यूज़र को इंतज़ार में रखें
+        // Add to waiting queue
         waitingUser = ws;
         ws.send(JSON.stringify({ type: 'system', text: 'waiting' }));
         console.log('User is waiting for a partner.');
     }
 
+    // Handle messages
     ws.on('message', (message) => {
         try {
-            const data = JSON.parse(message);
-            // संदेश को पार्टनर को भेजें
+            const data = JSON.parse(message.toString());
+            if (!['message', 'typing'].includes(data.type)) {
+                console.warn('Invalid message type:', data);
+                return;
+            }
             if (ws.partner && ws.partner.readyState === WebSocket.OPEN) {
                 ws.partner.send(JSON.stringify(data));
+            } else if (ws.partner) {
+                // Partner disconnected
+                ws.send(JSON.stringify({ type: 'system', text: 'disconnected' }));
+                ws.partner = null;
             }
         } catch (error) {
-            console.error('Invalid message format:', message);
+            console.error('Error parsing message:', error);
         }
     });
 
+    // Handle disconnect
     ws.on('close', () => {
         console.log('Client disconnected');
-        // अगर यूज़र का कोई पार्टनर था
-        if (ws.partner) {
-            // पार्टनर को बताएं कि दूसरा यूज़र चला गया
-            if (ws.partner.readyState === WebSocket.OPEN) {
-                ws.partner.send(JSON.stringify({ type: 'system', text: 'disconnected' }));
-            }
-            ws.partner.partner = null; // पार्टनर का लिंक हटा दें
-        }
-        // अगर यह यूज़र इंतज़ार कर रहा था
-        if (waitingUser === ws) {
+        if (ws === waitingUser) {
             waitingUser = null;
+        }
+        if (ws.partner && ws.partner.readyState === WebSocket.OPEN) {
+            ws.partner.send(JSON.stringify({ type: 'system', text: 'disconnected' }));
+            ws.partner.partner = null;
         }
     });
 
+    // Handle errors
     ws.on('error', (error) => {
         console.error('WebSocket error:', error);
+        ws.close();
     });
 });
 
-// Render.com द्वारा दिए गए पोर्ट पर सर्वर शुरू करें
+// Timeout for waiting users
+setInterval(() => {
+    if (waitingUser && Date.now() - waitingUser.createdAt > WAITING_TIMEOUT) {
+        console.log('Waiting timeout for user');
+        waitingUser.send(JSON.stringify({ type: 'system', text: 'timeout' }));
+        waitingUser.close();
+        waitingUser = null;
+    }
+}, 10000); // Check every 10 seconds
+
+// Start server on Render.com port
 const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => {
     console.log(`Server is listening on port ${PORT}`);
