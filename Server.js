@@ -9,38 +9,52 @@ app.use(cors());
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: '*', // Frontend URL ya '*'
+    origin: '*', // Allow all origins for now
     methods: ['GET', 'POST']
+  },
+  // Add connection optimization settings
+  pingTimeout: 60000,
+  pingInterval: 25000,
+  connectionStateRecovery: {
+    maxDisconnectionDuration: 2 * 60 * 1000,
+    skipMiddlewares: true,
   }
 });
 
-// User pairing ke liye
+// User pairing ke liye variables
 const waitingUsers = [];
 const connectedPairs = {};
 
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
   
-  // New user ko waiting list mein daalo
+  // New user ko waiting list mein add karo
   waitingUsers.push(socket.id);
   socket.emit('system', { text: 'waiting' });
   
-  // Pairing logic
+  // Do users available hone par unhe connect karo
   if (waitingUsers.length >= 2) {
     const user1 = waitingUsers.shift();
     const user2 = waitingUsers.shift();
+    
     connectedPairs[user1] = user2;
     connectedPairs[user2] = user1;
+    
+    // Dono users ko connected message bhejo
     io.to(user1).emit('system', { text: 'connected' });
     io.to(user2).emit('system', { text: 'connected' });
+    
     console.log(`Paired ${user1} with ${user2}`);
   }
   
   // Messages handle karo
   socket.on('message', (data) => {
     try {
+      // JSON string ko parse karo agar needed
       const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
+      
       if (parsedData.type === 'message') {
+        // Message ko paired user tak pahunchao
         const partnerId = connectedPairs[socket.id];
         if (partnerId) {
           io.to(partnerId).emit('message', {
@@ -49,9 +63,12 @@ io.on('connection', (socket) => {
           });
         }
       } else if (parsedData.type === 'typing') {
+        // Typing indicator paired user ko bhejo
         const partnerId = connectedPairs[socket.id];
         if (partnerId) {
-          io.to(partnerId).emit('message', { type: 'typing' });
+          io.to(partnerId).emit('message', {
+            type: 'typing'
+          });
         }
       }
     } catch (error) {
@@ -59,23 +76,47 @@ io.on('connection', (socket) => {
     }
   });
   
+  // Find stranger request handle karo
+  socket.on('find-stranger', () => {
+    // Pehle se waiting list mein nahi hai to add karo
+    if (!waitingUsers.includes(socket.id)) {
+      waitingUsers.push(socket.id);
+    }
+    socket.emit('system', { text: 'waiting' });
+    
+    // Try to pair immediately
+    if (waitingUsers.length >= 2) {
+      const user1 = waitingUsers.shift();
+      const user2 = waitingUsers.shift();
+      connectedPairs[user1] = user2;
+      connectedPairs[user2] = user1;
+      io.to(user1).emit('system', { text: 'connected' });
+      io.to(user2).emit('system', { text: 'connected' });
+    }
+  });
+  
   // Disconnect handle karo
   socket.on('disconnect', () => {
     console.log('User disconnected:', socket.id);
-    const partnerId = connectedPairs[socket.id];
-    if (partnerId) {
-      io.to(partnerId).emit('system', { text: 'disconnected' });
-      delete connectedPairs[partnerId];
-      waitingUsers.push(partnerId);
-      io.to(partnerId).emit('system', { text: 'waiting' });
-    }
-    delete connectedPairs[socket.id];
     
-    // Waiting list se bhi remove karo
+    // Waiting list se remove karo
     const index = waitingUsers.indexOf(socket.id);
     if (index !== -1) {
       waitingUsers.splice(index, 1);
     }
+    
+    // Partner ko disconnect message bhejo
+    const partnerId = connectedPairs[socket.id];
+    if (partnerId) {
+      io.to(partnerId).emit('system', { text: 'disconnected' });
+      delete connectedPairs[partnerId];
+      
+      // Partner ko phir se waiting list mein daalo
+      waitingUsers.push(partnerId);
+      io.to(partnerId).emit('system', { text: 'waiting' });
+    }
+    
+    delete connectedPairs[socket.id];
   });
 });
 
@@ -86,6 +127,11 @@ app.get('/health', (req, res) => {
     waitingUsers: waitingUsers.length,
     connectedPairs: Object.keys(connectedPairs).length / 2
   });
+});
+
+// Root endpoint
+app.get('/', (req, res) => {
+  res.send('Chat Server is Running');
 });
 
 const PORT = process.env.PORT || 3000;
