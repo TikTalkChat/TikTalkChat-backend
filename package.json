@@ -1,18 +1,15 @@
 {
   "name": "tiktalk-backend",
   "version": "1.0.0",
-  "description": "Backend for TikTalk Stranger Chat",
+  "description": "TikTalk chat and video call backend",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
-  "keywords": [
-    "chat",
-    "websocket"
-  ],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
-    "ws": "^8.17.1"
-  }
+    "express": "^4.17.1",
+    "ws": "^8.8.1"
+  },
+  "author": "",
+  "license": "ISC"
 }
