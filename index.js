@@ -1,138 +1,192 @@
 const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
-const path = require('path');
+const cors = require('cors');
+const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-const port = process.env.PORT || 3000;
+// Middleware
+app.use(cors());
+app.use(express.json());
 
-// Serve static files (HTML, CSS, JS)
-app.use(express.static(path.join(__dirname, 'public')));
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'OK', message: 'TikTalk Backend is running' });
+});
 
-// Store connected clients and their states
-const clients = new Map(); // Map<ws, { id, pairedWith, videoEnabled }>
+// Store clients, waiting lists, and connected pairs
+const clients = new Map(); // ws -> { id, mode }
+const waitingClients = { text: [], video: [] }; // mode -> [{ ws, id }]
+const connectedPairs = new Map(); // clientId -> { ws, mode, partnerId }
 
-// Generate unique ID for clients
-const generateId = () => Math.random().toString(36).substr(2, 9);
-
-// Pair clients for chat
-function pairClients(ws) {
-  const unpaired = Array.from(clients.entries()).find(
-    ([client, data]) => !data.pairedWith && client !== ws && client.readyState === WebSocket.OPEN
-  );
-
-  if (unpaired) {
-    const [otherWs, otherData] = unpaired;
-    clients.get(ws).pairedWith = otherData.id;
-    otherData.pairedWith = clients.get(ws).id;
-    ws.send(JSON.stringify({ type: 'system', text: 'connected' }));
-    otherWs.send(JSON.stringify({ type: 'system', text: 'connected' }));
-
-    // If both clients have video enabled, initiate WebRTC offer
-    if (clients.get(ws).videoEnabled && otherData.videoEnabled) {
-      ws.send(JSON.stringify({ type: 'system', text: 'initiate_offer' }));
-    }
-  } else {
-    ws.send(JSON.stringify({ type: 'system', text: 'waiting' }));
-    setTimeout(() => {
-      if (clients.get(ws)?.pairedWith || ws.readyState !== WebSocket.OPEN) return;
-      ws.send(JSON.stringify({ type: 'system', text: 'timeout' }));
-    }, 30000); // Timeout after 30 seconds
-  }
-}
-
-// Handle WebSocket connections
+// WebSocket connection handler
 wss.on('connection', (ws) => {
-  const clientId = generateId();
-  clients.set(ws, { id: clientId, pairedWith: null, videoEnabled: false });
+  const clientId = uuidv4(); // Generate unique client ID
+  clients.set(ws, { id: clientId, mode: 'text' }); // Default mode: text
+  console.log(`Client ${clientId} connected`);
 
   ws.on('message', (message) => {
-    let data;
     try {
-      data = JSON.parse(message);
-    } catch (e) {
-      console.error('Invalid JSON:', message);
-      return;
-    }
+      const data = JSON.parse(message);
+      const client = clients.get(ws);
 
-    const clientData = clients.get(ws);
-    const pairedClient = Array.from(clients.entries()).find(
-      ([client, data]) => data.id === clientData.pairedWith && client.readyState === WebSocket.OPEN
-    );
+      switch (data.type) {
+        case 'mode_change':
+          // Update client mode (text or video)
+          client.mode = data.video ? 'video' : 'text';
+          console.log(`Client ${clientId} switched to ${client.mode} mode`);
 
-    switch (data.type) {
-      case 'mode_change':
-        clientData.videoEnabled = data.video;
-        if (pairedClient) {
-          pairedClient[0].send(JSON.stringify({ type: 'mode_change', video: data.video }));
-          if (clientData.videoEnabled && pairedClient[1].videoEnabled) {
-            ws.send(JSON.stringify({ type: 'system', text: 'initiate_offer' }));
+          // If already paired, notify partner
+          const pair = connectedPairs.get(clientId);
+          if (pair) {
+            const partnerWs = getPartnerWs(pair.partnerId);
+            if (partnerWs && partnerWs.readyState === WebSocket.OPEN) {
+              partnerWs.send(JSON.stringify({ type: 'mode_change', video: data.video }));
+            }
+            // Remove from pair and re-add to waiting list
+            disconnectPair(clientId);
           }
-        }
-        break;
+          addToWaitingList(ws, client.mode);
+          break;
 
-      case 'message':
-        if (pairedClient) {
-          pairedClient[0].send(JSON.stringify({ type: 'message', text: data.text }));
-        }
-        break;
+        case 'message':
+          // Forward message to paired client
+          const pairMsg = connectedPairs.get(clientId);
+          if (pairMsg && pairMsg.ws.readyState === WebSocket.OPEN) {
+            pairMsg.ws.send(JSON.stringify({ type: 'message', text: data.text }));
+          }
+          break;
 
-      case 'typing':
-        if (pairedClient) {
-          pairedClient[0].send(JSON.stringify({ type: 'typing' }));
-        }
-        break;
+        case 'typing':
+          // Forward typing indicator to paired client
+          const pairTyping = connectedPairs.get(clientId);
+          if (pairTyping && pairTyping.ws.readyState === WebSocket.OPEN) {
+            pairTyping.ws.send(JSON.stringify({ type: 'typing' }));
+          }
+          break;
 
-      case 'offer':
-        if (pairedClient) {
-          pairedClient[0].send(JSON.stringify({ type: 'offer', offer: data.offer }));
-        }
-        break;
+        case 'offer':
+        case 'answer':
+        case 'candidate':
+          // Forward WebRTC signaling messages
+          const pairWebRTC = connectedPairs.get(clientId);
+          if (pairWebRTC && pairWebRTC.ws.readyState === WebSocket.OPEN) {
+            pairWebRTC.ws.send(JSON.stringify(data));
+          }
+          break;
 
-      case 'answer':
-        if (pairedClient) {
-          pairedClient[0].send(JSON.stringify({ type: 'answer', answer: data.answer }));
-        }
-        break;
-
-      case 'candidate':
-        if (pairedClient) {
-          pairedClient[0].send(JSON.stringify({ type: 'candidate', candidate: data.candidate }));
-        }
-        break;
+        default:
+          console.warn(`Unknown message type: ${data.type}`);
+      }
+    } catch (err) {
+      console.error(`Error parsing message for client ${clientId}:`, err);
     }
   });
 
   ws.on('close', () => {
-    const clientData = clients.get(ws);
-    const pairedClient = Array.from(clients.entries()).find(
-      ([client, data]) => data.id === clientData.pairedWith && client.readyState === WebSocket.OPEN
-    );
-
-    if (pairedClient) {
-      pairedClient[0].send(JSON.stringify({ type: 'system', text: 'disconnected' }));
-      pairedClient[1].pairedWith = null;
-    }
-
-    clients.delete(ws);
+    console.log(`Client ${clientId} disconnected`);
+    handleDisconnect(ws, clientId);
   });
 
   ws.on('error', (err) => {
-    console.error('WebSocket error:', err);
+    console.error(`WebSocket error for client ${clientId}:`, err);
+    handleDisconnect(ws, clientId);
   });
 
-  pairClients(ws);
+  // Add client to waiting list
+  addToWaitingList(ws, clients.get(ws).mode);
 });
 
-// Serve the main HTML file
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
+// Helper: Get WebSocket of a client by ID
+function getPartnerWs(partnerId) {
+  for (let [ws, client] of clients) {
+    if (client.id === partnerId && ws.readyState === WebSocket.OPEN) {
+      return ws;
+    }
+  }
+  return null;
+}
 
-// Start the server
-server.listen(port, () => {
-  console.log(`Server running at http://localhost:${port}`);
+// Add client to waiting list and attempt pairing
+function addToWaitingList(ws, mode) {
+  const clientId = clients.get(ws).id;
+  waitingClients[mode].push({ ws, id: clientId });
+  console.log(`Client ${clientId} added to ${mode} waiting list`);
+
+  // Try to pair if enough clients are waiting
+  if (waitingClients[mode].length >= 2) {
+    const client1 = waitingClients[mode].shift();
+    const client2 = waitingClients[mode].shift();
+
+    // Pair the clients
+    connectedPairs.set(client1.id, { ws: client2.ws, mode, partnerId: client2.id });
+    connectedPairs.set(client2.id, { ws: client1.ws, mode, partnerId: client1.id });
+
+    // Notify both clients
+    if (client1.ws.readyState === WebSocket.OPEN) {
+      client1.ws.send(JSON.stringify({ type: 'system', text: 'connected' }));
+      if (mode === 'video') {
+        client1.ws.send(JSON.stringify({ type: 'system', text: 'initiate_offer' }));
+      }
+    }
+    if (client2.ws.readyState === WebSocket.OPEN) {
+      client2.ws.send(JSON.stringify({ type: 'system', text: 'connected' }));
+    }
+
+    console.log(`Paired clients ${client1.id} and ${client2.id} in ${mode} mode`);
+  } else {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'system', text: 'waiting' }));
+    }
+  }
+}
+
+// Handle client disconnection
+function handleDisconnect(ws, clientId) {
+  // Remove from waiting lists
+  waitingClients.text = waitingClients.text.filter((client) => client.id !== clientId);
+  waitingClients.video = waitingClients.video.filter((client) => client.id !== clientId);
+
+  // Notify paired client
+  const pair = connectedPairs.get(clientId);
+  if (pair && pair.ws.readyState === WebSocket.OPEN) {
+    pair.ws.send(JSON.stringify({ type: 'system', text: 'disconnected' }));
+    connectedPairs.delete(pair.partnerId); // Remove partner's entry
+  }
+
+  // Clean up
+  connectedPairs.delete(clientId);
+  clients.delete(ws);
+}
+
+// Disconnect a pair (e.g., on mode change)
+function disconnectPair(clientId) {
+  const pair = connectedPairs.get(clientId);
+  if (pair && pair.ws.readyState === WebSocket.OPEN) {
+    pair.ws.send(JSON.stringify({ type: 'system', text: 'disconnected' }));
+    connectedPairs.delete(pair.partnerId);
+  }
+  connectedPairs.delete(clientId);
+}
+
+// Timeout waiting clients after 30 seconds
+setInterval(() => {
+  ['text', 'video'].forEach((mode) => {
+    waitingClients[mode].forEach((client) => {
+      if (client.ws.readyState === WebSocket.OPEN) {
+        client.ws.send(JSON.stringify({ type: 'system', text: 'timeout' }));
+        client.ws.close();
+      }
+    });
+    waitingClients[mode] = [];
+  });
+}, 30000);
+
+// Start server
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`TikTalk Backend running on port ${PORT}`);
 });
