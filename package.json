@@ -1,0 +1,17 @@
+{
+  "name": "tiktalk-backend",
+  "version": "1.0.0",
+  "description": "Backend for TikTalk Stranger Chat App",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "ws": "^8.17.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
