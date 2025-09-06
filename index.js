@@ -7,103 +7,132 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-// Serve static files from the 'public' directory
+const port = process.env.PORT || 3000;
+
+// Serve static files (HTML, CSS, JS)
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Store connected clients and their modes (chat or video)
-const clients = new Map();
-const waitingClients = { chat: [], video: [] };
+// Store connected clients and their states
+const clients = new Map(); // Map<ws, { id, pairedWith, videoEnabled }>
 
-function pairClients(mode) {
-    const waiting = waitingClients[mode];
-    if (waiting.length >= 2) {
-        const client1 = waiting.shift();
-        const client2 = waiting.shift();
-        client1.partner = client2.ws;
-        client2.partner = client1.ws;
-        client1.ws.send(JSON.stringify({ type: 'system', text: 'connected' }));
-        client2.ws.send(JSON.stringify({ type: 'system', text: 'connected' }));
-        client1.ws.send(JSON.stringify({ type: 'system', text: 'initiate_offer' }));
+// Generate unique ID for clients
+const generateId = () => Math.random().toString(36).substr(2, 9);
+
+// Pair clients for chat
+function pairClients(ws) {
+  const unpaired = Array.from(clients.entries()).find(
+    ([client, data]) => !data.pairedWith && client !== ws && client.readyState === WebSocket.OPEN
+  );
+
+  if (unpaired) {
+    const [otherWs, otherData] = unpaired;
+    clients.get(ws).pairedWith = otherData.id;
+    otherData.pairedWith = clients.get(ws).id;
+    ws.send(JSON.stringify({ type: 'system', text: 'connected' }));
+    otherWs.send(JSON.stringify({ type: 'system', text: 'connected' }));
+
+    // If both clients have video enabled, initiate WebRTC offer
+    if (clients.get(ws).videoEnabled && otherData.videoEnabled) {
+      ws.send(JSON.stringify({ type: 'system', text: 'initiate_offer' }));
     }
+  } else {
+    ws.send(JSON.stringify({ type: 'system', text: 'waiting' }));
+    setTimeout(() => {
+      if (clients.get(ws)?.pairedWith || ws.readyState !== WebSocket.OPEN) return;
+      ws.send(JSON.stringify({ type: 'system', text: 'timeout' }));
+    }, 30000); // Timeout after 30 seconds
+  }
 }
 
+// Handle WebSocket connections
 wss.on('connection', (ws) => {
-    const clientId = Math.random().toString(36).substring(2);
-    let clientMode = 'chat'; // Default mode
+  const clientId = generateId();
+  clients.set(ws, { id: clientId, pairedWith: null, videoEnabled: false });
 
-    clients.set(clientId, { ws, partner: null, mode: clientMode });
+  ws.on('message', (message) => {
+    let data;
+    try {
+      data = JSON.parse(message);
+    } catch (e) {
+      console.error('Invalid JSON:', message);
+      return;
+    }
 
-    ws.on('message', (message) => {
-        try {
-            const data = JSON.parse(message);
-            const client = clients.get(clientId);
+    const clientData = clients.get(ws);
+    const pairedClient = Array.from(clients.entries()).find(
+      ([client, data]) => data.id === clientData.pairedWith && client.readyState === WebSocket.OPEN
+    );
 
-            if (data.type === 'mode_change') {
-                client.mode = data.video ? 'video' : 'chat';
-                clientMode = client.mode;
-                if (client.partner) {
-                    client.partner.send(JSON.stringify({ type: 'system', text: 'disconnected' }));
-                    client.partner = null;
-                }
-                if (!waitingClients[clientMode].some(c => c.id === clientId)) {
-                    waitingClients[clientMode].push({ id: clientId, ws });
-                    ws.send(JSON.stringify({ type: 'system', text: 'waiting' }));
-                }
-                pairClients(clientMode);
-            } else if (data.type === 'message' && client.partner) {
-                client.partner.send(JSON.stringify({ type: 'message', text: data.text }));
-            } else if (data.type === 'typing' && client.partner) {
-                client.partner.send(JSON.stringify({ type: 'typing' }));
-            } else if (data.type === 'offer' && client.partner) {
-                client.partner.send(JSON.stringify({ type: 'offer', offer: data.offer }));
-            } else if (data.type === 'answer' && client.partner) {
-                client.partner.send(JSON.stringify({ type: 'answer', answer: data.answer }));
-            } else if (data.type === 'candidate' && client.partner) {
-                client.partner.send(JSON.stringify({ type: 'candidate', candidate: data.candidate }));
-            }
-        } catch (err) {
-            console.error('Error processing message:', err);
+    switch (data.type) {
+      case 'mode_change':
+        clientData.videoEnabled = data.video;
+        if (pairedClient) {
+          pairedClient[0].send(JSON.stringify({ type: 'mode_change', video: data.video }));
+          if (clientData.videoEnabled && pairedClient[1].videoEnabled) {
+            ws.send(JSON.stringify({ type: 'system', text: 'initiate_offer' }));
+          }
         }
-    });
+        break;
 
-    ws.on('close', () => {
-        const client = clients.get(clientId);
-        if (client) {
-            if (client.partner) {
-                client.partner.send(JSON.stringify({ type: 'system', text: 'disconnected' }));
-                client.partner = null;
-            }
-            waitingClients[client.mode] = waitingClients[client.mode].filter(c => c.id !== clientId);
-            clients.delete(clientId);
+      case 'message':
+        if (pairedClient) {
+          pairedClient[0].send(JSON.stringify({ type: 'message', text: data.text }));
         }
-    });
+        break;
 
-    ws.on('error', (err) => {
-        console.error('WebSocket error:', err);
-    });
+      case 'typing':
+        if (pairedClient) {
+          pairedClient[0].send(JSON.stringify({ type: 'typing' }));
+        }
+        break;
 
-    // Add client to waiting list for initial connection
-    waitingClients[clientMode].push({ id: clientId, ws });
-    ws.send(JSON.stringify({ type: 'system', text: 'waiting' }));
-    pairClients(clientMode);
+      case 'offer':
+        if (pairedClient) {
+          pairedClient[0].send(JSON.stringify({ type: 'offer', offer: data.offer }));
+        }
+        break;
+
+      case 'answer':
+        if (pairedClient) {
+          pairedClient[0].send(JSON.stringify({ type: 'answer', answer: data.answer }));
+        }
+        break;
+
+      case 'candidate':
+        if (pairedClient) {
+          pairedClient[0].send(JSON.stringify({ type: 'candidate', candidate: data.candidate }));
+        }
+        break;
+    }
+  });
+
+  ws.on('close', () => {
+    const clientData = clients.get(ws);
+    const pairedClient = Array.from(clients.entries()).find(
+      ([client, data]) => data.id === clientData.pairedWith && client.readyState === WebSocket.OPEN
+    );
+
+    if (pairedClient) {
+      pairedClient[0].send(JSON.stringify({ type: 'system', text: 'disconnected' }));
+      pairedClient[1].pairedWith = null;
+    }
+
+    clients.delete(ws);
+  });
+
+  ws.on('error', (err) => {
+    console.error('WebSocket error:', err);
+  });
+
+  pairClients(ws);
 });
 
-// Timeout for waiting clients
-setInterval(() => {
-    ['chat', 'video'].forEach(mode => {
-        waitingClients[mode].forEach(client => {
-            client.ws.send(JSON.stringify({ type: 'system', text: 'timeout' }));
-        });
-        waitingClients[mode] = [];
-    });
-}, 30000);
-
-// Serve the index.html file for the root route
+// Serve the main HTML file
 app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+// Start the server
+server.listen(port, () => {
+  console.log(`Server running at http://localhost:${port}`);
 });
