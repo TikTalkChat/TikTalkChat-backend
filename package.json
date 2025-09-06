@@ -9,12 +9,15 @@
   },
   "dependencies": {
     "ws": "^8.14.2",
-    "uuid": "^9.0.1"
+    "uuid": "^9.0.1",
+    "dotenv": "^16.4.5"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"
   },
   "engines": {
     "node": ">=18.0.0"
-  }
+  },
+  "author": "Your Name",
+  "license": "MIT"
 }
