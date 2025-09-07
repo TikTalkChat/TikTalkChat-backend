@@ -9,34 +9,15 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocketServer({ server });
 
-let waitingUser = null;
+// Purane 'waitingUser' ko hatakar do alag user variables banayein
+let waitingTextUser = null;
+let waitingVideoUser = null;
 
 wss.on('connection', (ws) => {
   console.log('Client connected');
 
-  // Partner dhundne ka logic
-  if (waitingUser) {
-    const partner = waitingUser;
-    waitingUser = null;
-
-    // Dono ko ek doosre se jodein
-    ws.partner = partner;
-    partner.partner = ws;
-
-    // Dono ko connection ka status bhejein
-    partner.send(JSON.stringify({ type: 'system', text: 'connected' }));
-    ws.send(JSON.stringify({ type: 'system', text: 'connected' }));
-
-    // Pehle user ko offer create karne ke liye trigger bhejein
-    partner.send(JSON.stringify({ type: 'system', text: 'initiate_offer' }));
-
-    console.log('Users paired');
-  } else {
-    // Agar koi wait nahi kar raha, to is user ko waiting me daalein
-    waitingUser = ws;
-    ws.send(JSON.stringify({ type: 'system', text: 'waiting' }));
-    console.log('User is waiting for a partner');
-  }
+  // Partner dhundne ka logic ab 'message' event me shift ho gaya hai,
+  // kyunki humein pehle user ka mode (text/video) janna zaroori hai.
 
   ws.on('message', (message) => {
     let data;
@@ -47,10 +28,56 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    // Message ko uske partner tak pahuchayein
+    // Pehle 'mode_change' message ko handle karein
+    if (data.type === 'mode_change') {
+      ws.isVideo = data.video; // User ka mode set karein
+      console.log(`User mode set to: ${ws.isVideo ? 'video' : 'text'}`);
+
+      let partner = null;
+
+      if (ws.isVideo) {
+        // --- VIDEO USER PAIRING LOGIC ---
+        if (waitingVideoUser) {
+          partner = waitingVideoUser;
+          waitingVideoUser = null;
+        } else {
+          waitingVideoUser = ws;
+        }
+      } else {
+        // --- TEXT USER PAIRING LOGIC ---
+        if (waitingTextUser) {
+          partner = waitingTextUser;
+          waitingTextUser = null;
+        } else {
+          waitingTextUser = ws;
+        }
+      }
+
+      if (partner) {
+        // Agar partner mil gaya hai
+        ws.partner = partner;
+        partner.partner = ws;
+
+        partner.send(JSON.stringify({ type: 'system', text: 'connected' }));
+        ws.send(JSON.stringify({ type: 'system', text: 'connected' }));
+
+        // Sirf video chat ke liye offer bhejein
+        if (ws.isVideo) {
+          partner.send(JSON.stringify({ type: 'system', text: 'initiate_offer' }));
+        }
+
+        console.log(`Users paired (${ws.isVideo ? 'video' : 'text'})`);
+      } else {
+        // Agar partner nahi mila, to waiting me daalein
+        ws.send(JSON.stringify({ type: 'system', text: 'waiting' }));
+        console.log(`User is waiting (${ws.isVideo ? 'video' : 'text'})`);
+      }
+      return; // 'mode_change' message ka kaam yahan khatm
+    }
+
+    // Baaki sabhi messages ko partner tak pahuchayein
     const partner = ws.partner;
     if (partner && partner.readyState === partner.OPEN) {
-        // Sirf message, typing, aur WebRTC signals ko forward karein
         if (['message', 'typing', 'offer', 'answer', 'candidate'].includes(data.type)) {
              partner.send(JSON.stringify(data));
         }
@@ -67,10 +94,14 @@ wss.on('connection', (ws) => {
       partner.partner = null; // Partner ka reference hata dein
     }
 
-    // Agar disconnect hone wala user hi waiting me tha
-    if (waitingUser === ws) {
-      waitingUser = null;
-      console.log('The waiting user has disconnected.');
+    // Agar disconnect hone wala user waiting me tha, to use waiting se hatayein
+    if (waitingTextUser === ws) {
+      waitingTextUser = null;
+      console.log('The waiting text user has disconnected.');
+    }
+    if (waitingVideoUser === ws) {
+      waitingVideoUser = null;
+      console.log('The waiting video user has disconnected.');
     }
     
     ws.partner = null; // Apna reference bhi hata dein
