@@ -9,73 +9,73 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocketServer({ server });
 
-// Purane 'waitingUser' ko hatakar do alag user variables banayein
 let waitingTextUser = null;
 let waitingVideoUser = null;
 
-wss.on('connection', (ws) => {
-  console.log('Client connected');
+console.log("--- Server started. Waiting lists are empty. ---");
 
-  // Partner dhundne ka logic ab 'message' event me shift ho gaya hai,
-  // kyunki humein pehle user ka mode (text/video) janna zaroori hai.
+wss.on('connection', (ws) => {
+  console.log('[LOG] New client connected.');
 
   ws.on('message', (message) => {
     let data;
     try {
       data = JSON.parse(message);
     } catch (e) {
-      console.error('Invalid JSON received:', message);
+      console.error('[ERROR] Invalid JSON received:', message);
       return;
     }
 
-    // Pehle 'mode_change' message ko handle karein
     if (data.type === 'mode_change') {
-      ws.isVideo = data.video; // User ka mode set karein
-      console.log(`User mode set to: ${ws.isVideo ? 'video' : 'text'}`);
+      ws.isVideo = data.video;
+      console.log(`[LOG] Received mode_change. User wants: ${ws.isVideo ? 'VIDEO' : 'TEXT'}`);
 
       let partner = null;
 
       if (ws.isVideo) {
         // --- VIDEO USER PAIRING LOGIC ---
+        console.log('--- Entering VIDEO matchmaking ---');
+        console.log(`[STATE] Is a video user waiting? ${!!waitingVideoUser}`);
+
         if (waitingVideoUser) {
           partner = waitingVideoUser;
           waitingVideoUser = null;
+          console.log('[SUCCESS] Paired two VIDEO users. Video waiting list is now empty.');
         } else {
           waitingVideoUser = ws;
+          console.log('[ACTION] No video partner found. Putting this user into the VIDEO waiting list.');
         }
       } else {
         // --- TEXT USER PAIRING LOGIC ---
+        console.log('--- Entering TEXT matchmaking ---');
+        console.log(`[STATE] Is a text user waiting? ${!!waitingTextUser}`);
+        
         if (waitingTextUser) {
           partner = waitingTextUser;
           waitingTextUser = null;
+          console.log('[SUCCESS] Paired two TEXT users. Text waiting list is now empty.');
         } else {
           waitingTextUser = ws;
+          console.log('[ACTION] No text partner found. Putting this user into the TEXT waiting list.');
         }
       }
 
       if (partner) {
-        // Agar partner mil gaya hai
         ws.partner = partner;
         partner.partner = ws;
 
         partner.send(JSON.stringify({ type: 'system', text: 'connected' }));
         ws.send(JSON.stringify({ type: 'system', text: 'connected' }));
 
-        // Sirf video chat ke liye offer bhejein
         if (ws.isVideo) {
           partner.send(JSON.stringify({ type: 'system', text: 'initiate_offer' }));
         }
-
-        console.log(`Users paired (${ws.isVideo ? 'video' : 'text'})`);
       } else {
-        // Agar partner nahi mila, to waiting me daalein
         ws.send(JSON.stringify({ type: 'system', text: 'waiting' }));
-        console.log(`User is waiting (${ws.isVideo ? 'video' : 'text'})`);
       }
-      return; // 'mode_change' message ka kaam yahan khatm
+      return;
     }
 
-    // Baaki sabhi messages ko partner tak pahuchayein
     const partner = ws.partner;
     if (partner && partner.readyState === partner.OPEN) {
         if (['message', 'typing', 'offer', 'answer', 'candidate'].includes(data.type)) {
@@ -85,34 +85,32 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
-    console.log('Client disconnected');
+    console.log('[LOG] Client disconnected.');
     const partner = ws.partner;
 
     if (partner) {
-      // Partner ko batayein ki user chala gaya
       partner.send(JSON.stringify({ type: 'system', text: 'disconnected' }));
-      partner.partner = null; // Partner ka reference hata dein
+      partner.partner = null;
     }
 
-    // Agar disconnect hone wala user waiting me tha, to use waiting se hatayein
     if (waitingTextUser === ws) {
       waitingTextUser = null;
-      console.log('The waiting text user has disconnected.');
+      console.log('[CLEANUP] The waiting TEXT user disconnected. List is now empty.');
     }
     if (waitingVideoUser === ws) {
       waitingVideoUser = null;
-      console.log('The waiting video user has disconnected.');
+      console.log('[CLEANUP] The waiting VIDEO user disconnected. List is now empty.');
     }
     
-    ws.partner = null; // Apna reference bhi hata dein
+    ws.partner = null;
   });
 
   ws.on('error', (error) => {
-    console.error('WebSocket error:', error);
+    console.error('[ERROR] WebSocket error:', error);
   });
 });
 
-const PORT = process.env.PORT || 10000; // Render apne aap PORT set karta hai
+const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => {
   console.log(`Server is listening on port ${PORT}`);
 });
