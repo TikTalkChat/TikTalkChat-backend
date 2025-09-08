@@ -1,7 +1,6 @@
 const { WebSocketServer } = require('ws');
 const http = require('http');
 
-// Ek basic HTTP server banayein, yeh Render ke health checks ke liye zaroori hai
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('TikTalk WebSocket Server is running');
