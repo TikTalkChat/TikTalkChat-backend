@@ -1,7 +1,7 @@
 {
-  "name": "tiktalk-backend",
+  "name": "chatsy-backend",
   "version": "1.0.0",
-  "description": "Backend for TikTalk Stranger Chat App",
+  "description": "Backend for ChatSy Stranger Chat App",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
