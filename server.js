@@ -4,7 +4,7 @@ const http = require("http");
 // HTTP server for Render health check
 const server = http.createServer((req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain" });
-  res.end("TikTalk WebSocket Server is running");
+  res.end("ChatSy WebSocket Server is running");
 });
 
 const wss = new WebSocketServer({ server });
@@ -13,7 +13,7 @@ let waitingTextUsers = [];
 let waitingVideoUsers = [];
 const MATCHMAKING_TIMEOUT = 15000; // 15 sec
 
-console.log("--- TikTalk Server Started ---");
+console.log("--- ChatSy Server Started ---");
 
 function safeSend(ws, msg) {
   if (ws.readyState === ws.OPEN) {
@@ -60,7 +60,7 @@ wss.on("connection", (ws, req) => {
   const origin = req.headers.origin;
 
   // ✅ Security: only allow from your frontend
-  if (origin !== "https://tiktalkchat.github.io") {
+  if (origin !== "https://chatsychat.github.io") {
     console.warn(`[SECURITY] Blocked connection from: ${origin}`);
     ws.close();
     return;
