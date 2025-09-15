@@ -60,7 +60,8 @@ wss.on("connection", (ws, req) => {
   const origin = req.headers.origin;
 
   // ✅ Security: only allow from your frontend
-  if (origin !== "https://chatsychat.github.io") {
+  // TODO: Update this URL once you buy and set up your custom domain
+  if (origin !== "https://tiktalkchat.github.io") {
     console.warn(`[SECURITY] Blocked connection from: ${origin}`);
     ws.close();
     return;
